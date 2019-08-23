@@ -1,4 +1,5 @@
-public func deBruijnSequence<Alphabets: RandomAccessCollection>(of alphabets:Alphabets, length: Int) -> [Alphabets.Element] {
+/// Return a De Bruijn sequence of order `length` over `alphabets`.
+public func deBruijnSequence<Alphabets: RandomAccessCollection>(of alphabets: Alphabets, length: Int) -> [Alphabets.Element] {
     typealias Alphabet = Alphabets.Element
     
     let alphabetCount = alphabets.count

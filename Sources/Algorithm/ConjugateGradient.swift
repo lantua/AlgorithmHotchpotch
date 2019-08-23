@@ -2,52 +2,62 @@ private func dot(_ a: [Float], _ b: [Float]) -> Float {
     assert(a.count == b.count)
     return zip(a, b).reduce(0) { $0 + $1.0 * $1.1 }
 }
+private func product(_ sparse: [(row: Int, column: Int, Float)], _ vector: [Float], n: Int) -> [Float] {
+    var result = [Float](repeating: 0, count: n)
+    for (row, column, a) in sparse {
+        result[row] += a * vector[column]
+    }
+    return result
+}
 
-public class ConjugateGradient {
-    private let A: [(Int, Int, Float)], b: [Float], n: Int
+/// Iteratively minimize 1/2 x^T A x - x^T b over `x`
+public struct ConjugateGradient: Sequence {
+    public struct Iterator: IteratorProtocol {
+        private let base: ConjugateGradient
 
-    private var x, p, r: [Float], sosR: Float
+        private var x, p, r: [Float], sosR: Float
 
-    public init(A: [(Int, Int, Float)], b: [Float], x: [Float]? = nil) {
-        self.n = b.count
-        self.A = A
-        self.b = b
+        fileprivate init(base: ConjugateGradient, x: [Float]) {
+            self.base = base
+            self.x = x
 
-        let x = x == nil ? [Float](repeating: 0, count: n) : x!
-        self.x = x
-
-        do {
-            var ax = [Float](repeating: 0, count: n)
-            for a in A {
-                ax[a.0] += a.2 * x[a.1]
-            }
-            r = zip(b, ax).map { $0 - $1 }
+            let ax = product(base.A, x, n: base.n)
+            r = zip(base.b, ax).map(-)
             p = r
             sosR = dot(r, r)
         }
+
+        public mutating func next() -> [Float]? {
+            guard sosR >= base.threshold else {
+                return nil
+            }
+
+            let ap = product(base.A, p, n: base.n)
+            let alpha = sosR / dot(p, ap)
+
+            x = zip(x, p).map { $0 + alpha * $1 }
+            r = zip(r, ap).map { $0 - alpha * $1 }
+
+            let newSOSR = dot(r, r), beta = newSOSR / sosR
+            
+            p = zip(r, p).map { $0 + beta * $1 }
+            sosR = newSOSR
+
+            return x
+        }
     }
 
-    public func nextX() -> [Float] {
-        var ap = [Float](repeating: 0, count: n)
-        for (i, j, a) in A {
-            ap[i] = a * p[j]
-        }
-        let pap = dot(p, ap)
+    /// A sparse matrix in form of array of (row, column, value).
+    public var A: [(row: Int, column: Int, value: Float)]
+    public var b: [Float]
+    /// Starting point for the conjugate gradient algorithm, or nil for zero vector.
+    public var x0: [Float]?
+    /// The stopping condition is when norm2(b - Ax)^2 < threshold.
+    public var threshold: Float = 1e-10
 
-        let alpha = sosR / pap
+    private var n: Int { return b.count }
 
-        let newX = zip(x, p).map { $0 + alpha * $1 }
-        let newR = zip(r, ap).map { $0 - alpha * $1 }
-        let newSOSR = dot(newR, newR)
-
-        let beta = newSOSR / sosR
-        let newP = zip(newR, p).map { $0 + beta * $1 }
-
-        x = newX
-        p = newP
-        r = newR
-        sosR = newSOSR
-
-        return newX
+    public __consuming func makeIterator() -> Iterator {
+        return .init(base: self, x: x0 ?? [Float](repeating: 0, count: n))
     }
 }

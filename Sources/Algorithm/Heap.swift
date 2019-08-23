@@ -7,10 +7,8 @@ public struct MinHeap<Element> {
     }
 
     public var isEmpty: Bool { return values.isEmpty }
+    public var min: Element? { return values.first }
 
-    public func min() -> Element? {
-        return values.first
-    }
     public mutating func insert(_ element: Element) {
         var current = values.count
         values.append(element)
@@ -18,16 +16,16 @@ public struct MinHeap<Element> {
         while current > 0 {
             let parent = (current - 1) / 2
 
-            if isLessThan(values[current], values[parent]) {
-                values.swapAt(parent, current)
-                current = parent
-            } else {
+            guard isLessThan(values[current], values[parent]) else {
                 break
             }
+
+            values.swapAt(parent, current)
+            current = parent
         }
     }
 
-    public mutating func removeMin() {
+    public mutating func popMin() {
         guard let last = values.popLast(),
             !values.isEmpty else {
             return
@@ -36,7 +34,7 @@ public struct MinHeap<Element> {
         replaceMin(with: last)
     }
 
-    /// Remove minimum value and insert `element` in a single heap traversal
+    /// Remove minimum value (if exists) and insert `element` in a single heap traversal
     public mutating func replaceMin(with element: Element) {
         guard !values.isEmpty else {
             values.append(element)
@@ -46,7 +44,7 @@ public struct MinHeap<Element> {
 
         var current = 0
         while true {
-            let leftIndex = current * 2 + 1, rightIndex = current * 2 + 2
+            let leftIndex = current * 2 + 1, rightIndex = leftIndex + 1
 
             guard leftIndex < values.count else {
                 break
@@ -59,12 +57,12 @@ public struct MinHeap<Element> {
                 child = rightIndex
             }
 
-            if isLessThan(values[child], values[current]) {
-                values.swapAt(child, current)
-                current = child
-            } else {
+            guard isLessThan(values[child], values[current]) else {
                 break
             }
+
+            values.swapAt(child, current)
+            current = child
         }
     }
 }

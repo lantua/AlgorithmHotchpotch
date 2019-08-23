@@ -1,52 +1,55 @@
-public struct Sampler<ID: Hashable> {
-    private var data: [(ID, ID, chanceOfFormer: Float)], average: Float
+private func share<ID>(underfull: inout (ID, ID, formerChance: Float), overfull: ID, chance: inout Float, average: Float) {
+    assert(underfull.formerChance <= average && chance >= average)
+
+    underfull.1 = overfull
+    chance += underfull.formerChance - average
+}
+
+/// Randomly pick `ID`, each with different weight.
+public struct Sampler<ID> {
+    private var data: [(ID, ID, formerChance: Float)], average: Float
 
     public init<S: Sequence>(_ data: S) where S.Element == (ID, Float) {
         self.init(raw: data.map { ($0.0, $0.0, $0.1) })
     }
 
-    private init(raw: [(ID, ID, chanceOfFormer: Float)]) {
+    private init(raw: [(ID, ID, formerChance: Float)]) {
+        precondition(raw.allSatisfy { $0.formerChance >= 0 })
         data = raw
+        average = data.map { $0.formerChance }.reduce(0, +) / Float(data.count)
 
-        let sum = data.map { $0.chanceOfFormer } .reduce(0, +)
-        average = sum / Float(data.count)
+        guard average > 0 else {
+            data = []
+            return
+        }
 
-        let overFullIndices: Range<Int>
-        var underFullIterator: IndexingIterator<Range<Int>>
+        let overfullIndices: Range<Int>
+        var underfullIndices: Range<Int>
         do {
-            let underFullCount = data.partition { $0.chanceOfFormer > average }
+            let pivot = data.partition { $0.formerChance > average }
 
-            guard underFullCount > 0 else {
+            guard pivot > data.startIndex else {
                 return
             }
 
-            let underFullIndices = data.indices.prefix(underFullCount - 1)
-            overFullIndices = data.indices.suffix(from: underFullCount)
-            underFullIterator = underFullIndices.makeIterator()
+            overfullIndices = data[pivot...].indices
+            underfullIndices = data[..<pivot].indices
         }
 
-        outer: for overFullIndex in overFullIndices {
-            var overFullValue: Float
-            let overFullKey: ID
-            (overFullKey, _, overFullValue) = data[overFullIndex]
-
-            do {
-                let underFullIndex = overFullIndex - 1
-                data[underFullIndex].1 = overFullKey
-
-                overFullValue += data[underFullIndex].chanceOfFormer - average
-            };
-
-            while overFullValue > average {
-                guard let underFullIndex = underFullIterator.next() else {
-                    break outer
-                }
-
-                data[underFullIndex].1 = overFullKey
-                overFullValue += data[underFullIndex].chanceOfFormer - average
+        for overfullIndex in overfullIndices {
+            let id: ID
+            var value: Float
+            (id, _, value) = data[overfullIndex]
+            defer {
+                data[overfullIndex].formerChance = value
             }
 
-            data[overFullIndex].chanceOfFormer = overFullValue
+            share(underfull: &data[data.index(before: overfullIndex)], overfull: id, chance: &value, average: average)
+
+            while value > average,
+                !underfullIndices.isEmpty {
+                    share(underfull: &data[underfullIndices.removeFirst()], overfull: id, chance: &value, average: average)
+            }
         }
     }
 
@@ -55,12 +58,11 @@ public struct Sampler<ID: Hashable> {
     }
 
     public func sample() -> ID? {
-        guard let (former, latter, chanceOfFormer) = data.randomElement() else {
+        guard let (former, latter, formerChance) = data.randomElement() else {
             return nil
         }
 
-        assert(0...average ~= chanceOfFormer || former == latter)
-        return Float.random(in: 0...average) < chanceOfFormer ? former : latter
+        return Float.random(in: 0...average) < formerChance ? former : latter
     }
 }
 
