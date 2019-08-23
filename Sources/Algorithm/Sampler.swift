@@ -29,6 +29,8 @@ public struct Sampler<ID> {
             let pivot = data.partition { $0.formerChance > average }
 
             guard pivot > data.startIndex else {
+                // This should never execute, but on an off-chance that
+                // rounding error leads us here, we'd still be safe.
                 return
             }
 

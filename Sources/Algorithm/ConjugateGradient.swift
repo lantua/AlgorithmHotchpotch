@@ -47,7 +47,7 @@ public struct ConjugateGradient: Sequence {
         }
     }
 
-    /// A sparse matrix in form of array of (row, column, value).
+    /// A 0-based sparse matrix in form of array of (row, column, value).
     public var A: [(row: Int, column: Int, value: Float)]
     public var b: [Float]
     /// Starting point for the conjugate gradient algorithm, or nil for zero vector.
