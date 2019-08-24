@@ -1,283 +1,206 @@
 import Accelerate
 
-public protocol SpectralGraphDelegate: class {
-    func moved(node: Any, to: [Float])
+private var generator = SystemRandomNumberGenerator()
+private func exponentialRandom() -> Int {
+    return generator.next().trailingZeroBitCount
 }
 
-public class SpectralGraph<Node: Hashable> {
-    private var nodes: [Node: Int] = [:]
-    private var locations: [[Float]]
+/// Spectral Layout Algorithm
+/// Optimize the *aesthetic* function of the node location.
+public struct SpectralLayout<GraphID: Hashable> {
+    private let threshold: Float
+    private var graphs: [GraphID: Graph]
+    private var edgeWeights: [[Int: Float]], dirtyList: Set<Int>
+    private var convergedCount = 0, converging = false
+
+    /// The position of each node, arrange in positions[dimension][nodeIndex].
+    public private(set) var positions: [[Float]]
+    /// The maximum magnitude of each dimension, that is -bounds[k] <= locations[k][*] <= bounds[k].
     public var bounds: [Float] {
         didSet {
-            assert(bounds.count == locations.count)
+            precondition(bounds.count == positions.count && bounds.allSatisfy { $0 > 0 })
             convergedCount = 0
         }
     }
 
-    public weak var delegate: SpectralGraphDelegate?
+    /**
+     - parameters:
+        - graphWeights: Weight of each graph. This let us separate the entire graph into subgraphs, each with separate weight.
+        - nodeCount: Maximum number of node.
+        - dimension: Number of dimension to preserve.
+        - threshold: Threshold to stop computing the next iteration.
+     */
+    public init(graphWeights: [GraphID: Float], nodeCount: Int, dimension: Int, threshold: Float = 1e-9) {
+        self.threshold = threshold
 
-    private var edges: [[(Int, Float)]] = [], degrees: [Float] = [], sumOfDegrees: Float = 0
-    private var convergedCount = 0
+        graphs = graphWeights.mapValues { Graph(weight: $0, count: nodeCount) }
+        edgeWeights = Array(repeating: [:], count: nodeCount)
+        dirtyList = []
 
-    public init(dimension: Int) {
-        locations = Array(repeating: [], count: dimension)
         bounds = Array(repeating: 1, count: dimension)
+        positions = repeatElement((), count: dimension).map {
+            repeatElement((), count: nodeCount).map { Float.random(in: -1...1) }
+        }
     }
 
-    public func updateLocations() {
-        notifyMoving(node: nil)
-    }
-}
+    /// Add edge between `first` and `second` nodes in `graph` if it doesn't exist.
+    public mutating func attach(_ first: Int, _ second: Int, graph: GraphID) {
+        precondition(graphs[graph] != nil)
 
-private extension SpectralGraph {
-    func notifyMoving(node: Node?) {
-        if let node = node {
-            let index = nodes[node]!
-            delegate?.moved(node: node, to: locations.map { $0[index] })
-        } else if let delegate = delegate {
-            for (node, index) in nodes {
-                delegate.moved(node: node, to: locations.map { $0[index] })
+        if graphs[graph]!.attach(first, second) {
+            dirtyList.insert(first)
+            dirtyList.insert(second)
+        }
+    }
+
+    /// Remove edge between `first` and `second` nodes in `graph` if it exists.
+    public mutating func detach(_ first: Int, _ second: Int, graph: GraphID) {
+        precondition(graphs[graph] != nil)
+
+        if graphs[graph]!.detach(first, second) {
+            dirtyList.insert(first)
+            dirtyList.insert(second)
+        }
+    }
+
+    /// Compute the next iteration
+    /// - returns: The dimension that is updated, if any.
+    public mutating func advance() -> Int? {
+        cleanup()
+
+        guard !converging else {
+            // The lowest dimension is converging, lets orthogonalize it against all converged dimension.
+            for other in 0..<convergedCount {
+                orthogonalize(&positions[convergedCount], from: positions[other])
+            }
+            update(k: convergedCount)
+            return convergedCount
+        }
+
+        let range = convergedCount..<positions.count
+
+        guard !range.isEmpty,
+            let k = range.dropFirst(exponentialRandom() % range.count).first else {
+                return nil
+        }
+        if let other = (0..<k).randomElement() {
+            orthogonalize(&positions[k], from: positions[other])
+        }
+        update(k: k)
+        return k
+    }
+
+    private mutating func update(k: Int) {
+        let old = positions[k]
+        var new = old
+
+        for (first, edges) in edgeWeights.enumerated() {
+            for (second, weight) in edges {
+                new[first] += weight * old[second]
+                new[second] += weight * old[first]
             }
         }
-    }
-}
 
-public extension SpectralGraph {
-    func advance() -> Bool {
-        guard nodes.count > locations.count,
-            convergedCount < locations.count else {
-                return false
+        let validRange = -bounds[k]...bounds[k]
+        new = new.map {
+            $0.isFinite ? $0 : Float.random(in: validRange)
         }
-        for k in convergedCount..<locations.count {
-            update(dimension: k)
-        }
-        notifyMoving(node: nil)
-        return true
-    }
-
-    private func update(dimension k: Int) {
-        var location = locations[k]
-        let vDSPNodeCount = vDSP_Length(location.count)
-
-        do { // Orthogonalize
-            // Center `location` at 0
-            let factor = dot(location, degrees) / Float(sumOfDegrees)
-            vDSP_vsadd(location, 1, [-factor], &location, 1, vDSPNodeCount)
-
-            var tmpDU = Array(repeating: Float(), count: location.count)
-            for baseLocation in locations.prefix(k) {
-                // tmpDU[*] = baseLocation[*] * degrees[*]
-                vDSP_vmul(baseLocation, 1, degrees, 1, &tmpDU, 1, vDSPNodeCount)
-                let factor = dot(location, tmpDU) / dot(baseLocation, tmpDU)
-                // locations[k][*] -= locations[l][*] * factor
-                vDSP_vsma(baseLocation, 1, [-factor], location, 1, &location, 1, vDSPNodeCount)
-            }
-        }
-
-        // Multiply with 1⁄2(I + D-1A)
-        // newLocation[*] = location[*] + dot(outWeight[**], outNeighbour[**]) / degree[*]
-        var newLocations = [Float](repeating: 0, count: nodes.count)
-        for (id1, outEdges) in edges.enumerated() {
-            for (id2, degree) in outEdges {
-                newLocations[id1] += location[id2] * degree
-                newLocations[id2] += location[id1] * degree
-            }
-        }
-        vDSP_vdiv(degrees, 1, newLocations, 1, &newLocations, 1, vDSPNodeCount)
-        vDSP_vadd(newLocations, 1, location, 1, &newLocations, 1, vDSPNodeCount)
-        rebound(&newLocations, to: bounds[k])
+        rebound(&new, to: bounds[k])
 
         if k == convergedCount {
-            var distance = Float.nan
-            vDSP_distancesq(newLocations, 1, location, 1, &distance, vDSPNodeCount)
-            if distance < 5e-9 * bounds[k] * bounds[k] * Float(nodes.count) {
-                convergedCount += 1
+            var distance: Float = .signalingNaN
+            vDSP_distancesq(new, 1, old, 1, &distance, vDSP_Length(new.count))
+
+            if sqrt(distance) / bounds[k] < threshold {
+                if converging {
+                    convergedCount += 1
+                }
+                converging.toggle()
             }
         }
 
-        locations[k] = newLocations
+        positions[k] = new
     }
 }
 
-public extension SpectralGraph {
-    func resetLocations() {
-        locations = (0..<locations.count).map { i in
-            repeatElement((), count: nodes.count).map {
-                Float.random(in: -bounds[i]...bounds[i])
-            }
-        }
-
-        notifyMoving(node: nil)
-        convergedCount = 0
-    }
-    subscript(node: Node) -> [Float]? {
-        get {
-            guard let id = nodes[node] else {
-                return nil
-            }
-            return locations.map { $0[id] }
-        }
-        set {
-            if let id = nodes[node] {
-                if let newValue = newValue {
-                    for (i, newValue) in zip(locations.indices, newValue) {
-                        locations[i][id] = newValue
-                    }
-                    notifyMoving(node: node)
-                } else {
-                    remove(node: node, id: id)
-                }
-            } else if let newValue = newValue {
-                add(node: node, at: newValue)
-            }
-
-            convergedCount = 0
-        }
-    }
-
-    func add(node: Node, at location: [Float]? = nil) {
-        guard nodes[node] == nil else {
+private extension SpectralLayout {
+    mutating func cleanup() {
+        guard !dirtyList.isEmpty else {
             return
         }
 
-        let id = nodes.count
-        nodes[node] = id
-        for i in locations.indices {
-            locations[i].append(location?[i] ?? Float.random(in: -bounds[i]...bounds[i]))
-        }
-        degrees.append(0)
-        edges.append([])
-
-        notifyMoving(node: node)
         convergedCount = 0
-    }
 
-    // Remove all (node, _) edges and replace them with (node, neighbours[*])
-    func refreshHalfEdges<S: Sequence>(from node: Node, with neighbours: S) where S.Element == (Node, Float) {
-        guard let nodeID = nodes[node] else {
-            return
-        }
+        for dirty in dirtyList {
+            let sum = graphs.values.map { Float($0.outEdges[dirty].count + $0.inEdges[dirty].count) * $0.weight }.reduce(0, +)
 
-        let neighbours = Dictionary(neighbours.compactMap { neighbour -> (Int, Float)? in
-            guard let id = nodes[neighbour.0],
-                id != nodeID else {
-                    return nil
-            }
-            return (id, neighbour.1)
-        }, uniquingKeysWith: +)
-
-        removeEdgeDegree(from: nodeID)
-        edges[nodeID] = neighbours.map { $0 }
-        addEdgeDegree(from: nodeID)
-
-        convergedCount = 0
-    }
-}
-
-private extension SpectralGraph {
-    func remove(node: Node, id: Int) {
-        assert(nodes[node] != nil)
-
-        if id == nodes.count - 1 {
-            remove(lastNode: node)
-        } else {
-            replaceWithLastNode(node)
-        }
-
-        convergedCount = 0
-    }
-
-    func remove(lastNode: Node) {
-        let deletingID = nodes.removeValue(forKey: lastNode)!
-        assert(deletingID == nodes.count)
-
-        for i in locations.indices {
-            locations[i].removeLast()
-        }
-
-        removeEdgeDegree(from: deletingID)
-        edges.removeLast()
-        removeEdges(to: deletingID)
-        degrees.removeLast()
-    }
-
-    func replaceWithLastNode(_ deletingNode: Node) {
-        let deletingID = nodes.removeValue(forKey: deletingNode)!
-        let lastID = nodes.count
-        let lastNode = nodes.first(where: { $0.value == lastID })!.key
-        nodes[lastNode] = deletingID
-
-        assert(deletingID != lastID)
-
-        for i in locations.indices {
-            locations[i][deletingID] = locations[i].removeLast()
-        }
-
-        removeEdges(to: deletingID)
-        removeEdgeDegree(from: deletingID)
-        edges[deletingID] = edges.removeLast()
-        degrees[deletingID] = degrees.removeLast()
-        for i in edges.indices {
-            edges[i] = edges[i].map {
-                let id = $0.0 == lastID ? deletingID : $0.0
-                return (id, $0.1)
-            }
-        }
-    }
-}
-
-private extension SpectralGraph {
-    func addEdgeDegree(from nodeID: Int) {
-        var sum: Float = 0
-        for (neighbour, degree) in edges[nodeID] {
-            assert(neighbour != nodeID)
-            degrees[neighbour] += degree
-            sum += degree
-        }
-        degrees[nodeID] += sum
-        sumOfDegrees += 2 * sum
-    }
-
-    func removeEdgeDegree(from nodeID: Int) {
-        var sum: Float = 0
-        for (neighbour, degree) in edges[nodeID] {
-            assert(neighbour != nodeID)
-            degrees[neighbour] -= degree
-            sum += degree
-        }
-        degrees[nodeID] -= sum
-        sumOfDegrees -= 2 * sum
-    }
-    func removeEdges(to nodeID: Int) {
-        var sum: Float = 0
-        for neighbour in edges.indices {
-            edges[neighbour].removeAll {
-                let (destination, degree) = $0
-                if destination == nodeID {
-                    assert(neighbour != nodeID)
-                    degrees[neighbour] -= degree
-                    sum += degree
-                    return true
+            var weights: [Int: Float] = [:]
+            for graph in graphs.values {
+                for other in graph.inEdges[dirty] {
+                    weights[other, default: 0] += graph.weight
                 }
-                return false
+                for other in graph.outEdges[dirty] {
+                    weights[other, default: 0] += graph.weight
+                }
             }
+
+            edgeWeights[dirty] = weights.mapValues { $0 / sum }
         }
 
-        degrees[nodeID] -= sum
-        sumOfDegrees -= 2 * sum
+        dirtyList = []
     }
+}
+
+private struct Graph {
+    let weight: Float
+    var outEdges, inEdges: [Set<Int>]
+
+    init(weight: Float, count: Int) {
+        self.weight = weight
+        outEdges = Array(repeating: [], count: count)
+        inEdges = Array(repeating: [], count: count)
+    }
+
+    mutating func attach(_ first: Int, _ second: Int) -> Bool {
+        precondition(first != second)
+        if outEdges[first].insert(second).inserted {
+            let inserted = inEdges[second].insert(first).inserted
+            assert(inserted)
+            return true
+        }
+        return false
+    }
+
+    mutating func detach(_ first: Int, _ second: Int) -> Bool {
+        precondition(first != second)
+        if outEdges[first].remove(second) != nil {
+            let inserted = inEdges[second].insert(first).inserted
+            assert(inserted)
+            return true
+        }
+        return false
+    }
+}
+
+private func orthogonalize(_ value: inout [Float], from base: [Float]) {
+    assert(value.count == base.count)
+
+    let factor = -dot(value, base) / dot(base, base)
+    vDSP_vsma(base, 1, [factor], value, 1, &value, 1, vDSP_Length(value.count))
 }
 
 private func dot(_ lhs: [Float], _ rhs: [Float]) -> Float {
     assert(lhs.count == rhs.count)
-    var output: Float = 0
+
+    var output: Float = .signalingNaN
     vDSP_dotpr(lhs, 1, rhs, 1, &output, vDSP_Length(lhs.count))
     return output
 }
 
 private func rebound(_ values: inout [Float], to bound: Float) {
     assert(bound > 0)
-    var magnitude: Float = 0
+
+    var magnitude: Float = .signalingNaN
     vDSP_maxmgv(values, 1, &magnitude, vDSP_Length(values.count))
     vDSP_vsmul(values, 1, [bound / magnitude], &values, 1, vDSP_Length(values.count))
 }
