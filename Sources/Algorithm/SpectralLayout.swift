@@ -10,7 +10,7 @@ private func exponentialRandom() -> Int {
 public struct SpectralLayout<GraphID: Hashable> {
     private let threshold: Float
     private var graphs: [GraphID: Graph]
-    private var edgeWeights: [[Int: Float]], dirtyList: Set<Int>
+    private var edgeWeights: [[Int: Float]], degrees: [Float], dirtyList: Set<Int> = []
     private var convergedCount = 0, converging = false
 
     /// The position of each node, arrange in positions[dimension][nodeIndex].
@@ -30,12 +30,13 @@ public struct SpectralLayout<GraphID: Hashable> {
         - dimension: Number of dimension to preserve.
         - threshold: Threshold to stop computing the next iteration.
      */
-    public init(graphWeights: [GraphID: Float], nodeCount: Int, dimension: Int, threshold: Float = 1e-9) {
+    public init(graphWeights: [GraphID: Float], dimension: Int, nodeCount: Int = 0, threshold: Float = 1e-9) {
         self.threshold = threshold
 
-        graphs = graphWeights.mapValues { Graph(weight: $0, count: nodeCount) }
+        graphs = graphWeights.mapValues { Graph(weight: $0, nodeCount: nodeCount) }
+
         edgeWeights = Array(repeating: [:], count: nodeCount)
-        dirtyList = []
+        degrees = Array(repeating: 0, count: nodeCount)
 
         bounds = Array(repeating: 1, count: dimension)
         positions = repeatElement((), count: dimension).map {
@@ -43,9 +44,135 @@ public struct SpectralLayout<GraphID: Hashable> {
         }
     }
 
+    /// Compute the next iteration
+    /// - returns: The dimension that is updated, if any.
+    public mutating func advance(dimension: Int? = nil) -> Int? {
+        cleanup()
+
+        guard convergedCount < positions.count else {
+            return nil
+        }
+        let updating = dimension ?? (convergedCount + exponentialRandom() % (positions.count - convergedCount))
+        let old = updating == convergedCount ? positions[updating] : nil
+
+        if updating == convergedCount {
+            for other in 0..<convergedCount {
+                orthogonalize(&positions[convergedCount], from: positions[other])
+            }
+        } else if let other = (0..<updating).randomElement() {
+            orthogonalize(&positions[updating], from: positions[other])
+        }
+
+        update(&positions[updating], bound: bounds[updating])
+
+        if let old = old {
+            let new = positions[updating]
+            let distance = 1 - (dot(old, new) / sqrt(dot(new, new) * dot(old, old)))
+
+            if threshold > distance {
+                if converging {
+                    convergedCount += 1
+                }
+                converging.toggle()
+            }
+        }
+
+        return updating
+    }
+
+    private func update(_ value: inout [Float], bound: Float) {
+        let old = value
+
+        for (first, edges) in edgeWeights.enumerated() {
+            for (second, weight) in edges {
+                value[first] += weight * old[second]
+            }
+        }
+
+        value = value.map {
+            $0.isFinite ? $0 : Float.random(in: -bound...bound)
+        }
+        rebound(&value, to: bound)
+    }
+}
+
+public extension SpectralLayout {
+    /// Position of the node at `nodeID`
+    subscript(node nodeID: Int) -> [Float] {
+        get { return positions.map { $0[nodeID] } }
+        set {
+            for i in positions.indices {
+                positions[i][nodeID] = newValue[i]
+            }
+            convergedCount = 0
+        }
+    }
+
+    /// Add a new node.
+    /// - returns: `id` of the added node.
+    mutating func addNode() -> Int {
+        let nodeID = edgeWeights.count
+        for graphID in graphs.keys {
+            graphs[graphID]!.appendNode()
+        }
+        edgeWeights.append([:])
+        degrees.append(0)
+
+        for dimension in positions.indices {
+            positions[dimension].append(Float.random(in: -bounds[dimension]...bounds[dimension]))
+        }
+        return nodeID
+    }
+
+    /// Remove node at `nodeID`.
+    /// - returns: `id` of the node that is replaced by `node`.
+    /// - Postcondition: Update `return value` -> `nodeID` on all external records.
+    mutating func removeNode(at nodeID: Int) -> Int? {
+        let lastID = edgeWeights.index(before: edgeWeights.endIndex)
+
+        defer {
+            for graphID in graphs.keys {
+                graphs[graphID]!.removeLastNode()
+            }
+            for dimension in positions.indices {
+                positions[dimension].removeLast()
+            }
+
+            edgeWeights.removeLast()
+            degrees.removeLast()
+            dirtyList.remove(lastID)
+        }
+
+        var neighbours: Set<Int> = []
+        for graphID in graphs.keys {
+            neighbours.formUnion(graphs[graphID]!.removeEdges(connectedTo: nodeID))
+        }
+        assert(!neighbours.contains(nodeID))
+        dirtyList.formUnion(neighbours)
+
+        guard lastID != nodeID else {
+            return nil
+        }
+
+        for graphID in graphs.keys {
+            graphs[graphID]!.replaceWithLastNode(node: nodeID)
+        }
+        for (neighbour, _) in edgeWeights[lastID] where !dirtyList.contains(neighbour) {
+            edgeWeights[neighbour][nodeID] = edgeWeights[neighbour].removeValue(forKey: lastID)!
+        }
+        degrees[nodeID] = degrees[lastID]
+        if dirtyList.contains(lastID) {
+            dirtyList.insert(nodeID)
+        }
+        for index in positions.indices {
+            positions[index][nodeID] = positions[index][lastID]
+        }
+        return lastID
+    }
+
     /// Add edge between `first` and `second` nodes in `graph` if it doesn't exist.
-    public mutating func attach(_ first: Int, _ second: Int, graph: GraphID) {
-        precondition(graphs[graph] != nil)
+    mutating func attach(_ first: Int, _ second: Int, graph: GraphID) {
+        precondition(first != second && graphs[graph] != nil)
 
         if graphs[graph]!.attach(first, second) {
             dirtyList.insert(first)
@@ -54,72 +181,28 @@ public struct SpectralLayout<GraphID: Hashable> {
     }
 
     /// Remove edge between `first` and `second` nodes in `graph` if it exists.
-    public mutating func detach(_ first: Int, _ second: Int, graph: GraphID) {
-        precondition(graphs[graph] != nil)
+    mutating func detach(_ first: Int, _ second: Int, graph: GraphID) {
+        precondition(first != second && graphs[graph] != nil)
 
         if graphs[graph]!.detach(first, second) {
             dirtyList.insert(first)
             dirtyList.insert(second)
         }
     }
+}
 
-    /// Compute the next iteration
-    /// - returns: The dimension that is updated, if any.
-    public mutating func advance() -> Int? {
-        cleanup()
-
-        guard !converging else {
-            // The lowest dimension is converging, lets orthogonalize it against all converged dimension.
-            for other in 0..<convergedCount {
-                orthogonalize(&positions[convergedCount], from: positions[other])
-            }
-            update(k: convergedCount)
-            return convergedCount
+extension SpectralLayout {
+    func listEdges() -> [GraphID: [(Int, Int)]] {
+        for clean in 0..<degrees.count where !dirtyList.contains(clean) {
+            assert((edgeWeights[clean], degrees[clean]) == computeCache(at: clean))
         }
 
-        let range = convergedCount..<positions.count
-
-        guard !range.isEmpty,
-            let k = range.dropFirst(exponentialRandom() % range.count).first else {
-                return nil
-        }
-        if let other = (0..<k).randomElement() {
-            orthogonalize(&positions[k], from: positions[other])
-        }
-        update(k: k)
-        return k
-    }
-
-    private mutating func update(k: Int) {
-        let old = positions[k]
-        var new = old
-
-        for (first, edges) in edgeWeights.enumerated() {
-            for (second, weight) in edges {
-                new[first] += weight * old[second]
-                new[second] += weight * old[first]
+        return graphs.mapValues {
+            $0.outEdges.enumerated().flatMap { arg -> [(Int, Int)] in
+                let (first, seconds) = arg
+                return seconds.map { (first, $0) }
             }
         }
-
-        let validRange = -bounds[k]...bounds[k]
-        new = new.map {
-            $0.isFinite ? $0 : Float.random(in: validRange)
-        }
-        rebound(&new, to: bounds[k])
-
-        if k == convergedCount {
-            var distance: Float = .signalingNaN
-            vDSP_distancesq(new, 1, old, 1, &distance, vDSP_Length(new.count))
-
-            if sqrt(distance) / bounds[k] < threshold {
-                if converging {
-                    convergedCount += 1
-                }
-                converging.toggle()
-            }
-        }
-
-        positions[k] = new
     }
 }
 
@@ -129,25 +212,28 @@ private extension SpectralLayout {
             return
         }
 
-        convergedCount = 0
-
         for dirty in dirtyList {
-            let sum = graphs.values.map { Float($0.outEdges[dirty].count + $0.inEdges[dirty].count) * $0.weight }.reduce(0, +)
-
-            var weights: [Int: Float] = [:]
-            for graph in graphs.values {
-                for other in graph.inEdges[dirty] {
-                    weights[other, default: 0] += graph.weight
-                }
-                for other in graph.outEdges[dirty] {
-                    weights[other, default: 0] += graph.weight
-                }
-            }
-
-            edgeWeights[dirty] = weights.mapValues { $0 / sum }
+            (edgeWeights[dirty], degrees[dirty]) = computeCache(at: dirty)
         }
 
         dirtyList = []
+        convergedCount = 0
+    }
+
+    func computeCache(at nodeID: Int) -> (edgeWeight: [Int: Float], degree: Float) {
+        let sum = graphs.values.map { Float($0.outEdges[nodeID].count + $0.inEdges[nodeID].count) * $0.weight }.reduce(0, +)
+
+        var weights: [Int: Float] = [:]
+        for graph in graphs.values {
+            for other in graph.inEdges[nodeID] {
+                weights[other, default: 0] += graph.weight
+            }
+            for other in graph.outEdges[nodeID] {
+                weights[other, default: 0] += graph.weight
+            }
+        }
+
+        return (weights.mapValues { $0 / sum }, sum)
     }
 }
 
@@ -155,30 +241,72 @@ private struct Graph {
     let weight: Float
     var outEdges, inEdges: [Set<Int>]
 
-    init(weight: Float, count: Int) {
+    init(weight: Float, nodeCount: Int) {
         self.weight = weight
-        outEdges = Array(repeating: [], count: count)
-        inEdges = Array(repeating: [], count: count)
+        outEdges = Array(repeating: [], count: nodeCount)
+        inEdges = Array(repeating: [], count: nodeCount)
     }
 
     mutating func attach(_ first: Int, _ second: Int) -> Bool {
-        precondition(first != second)
+        assert(first != second)
         if outEdges[first].insert(second).inserted {
-            let inserted = inEdges[second].insert(first).inserted
-            assert(inserted)
+            inEdges[second].insert(first)
             return true
         }
         return false
     }
 
     mutating func detach(_ first: Int, _ second: Int) -> Bool {
-        precondition(first != second)
+        assert(first != second)
         if outEdges[first].remove(second) != nil {
-            let inserted = inEdges[second].insert(first).inserted
-            assert(inserted)
+            inEdges[second].remove(first)
             return true
         }
         return false
+    }
+
+    mutating func appendNode() {
+        outEdges.append([])
+        inEdges.append([])
+    }
+
+    mutating func removeLastNode() {
+        inEdges.removeLast()
+        outEdges.removeLast()
+    }
+
+    mutating func removeEdges(connectedTo node: Int) -> Set<Int> {
+        var neighbours: Set<Int> = []
+        for neighbour in outEdges[node] {
+            inEdges[neighbour].remove(node)
+            neighbours.insert(neighbour)
+        }
+        for neighbour in inEdges[node] {
+            outEdges[neighbour].remove(node)
+            neighbours.insert(neighbour)
+        }
+        inEdges[node] = []
+        outEdges[node] = []
+        return neighbours
+    }
+
+    mutating func replaceWithLastNode(node: Int) {
+        assert(outEdges[node].isEmpty && inEdges[node].isEmpty)
+
+        let lastID = outEdges.index(before: outEdges.endIndex)
+        assert(lastID != node)
+
+        for neighbour in outEdges[lastID] {
+            inEdges[neighbour].remove(lastID)
+            inEdges[neighbour].insert(node)
+        }
+        for neighbour in inEdges[lastID] {
+            outEdges[neighbour].remove(lastID)
+            outEdges[neighbour].insert(node)
+        }
+
+        outEdges.swapAt(node, lastID)
+        inEdges.swapAt(node, lastID)
     }
 }
 
@@ -200,7 +328,10 @@ private func dot(_ lhs: [Float], _ rhs: [Float]) -> Float {
 private func rebound(_ values: inout [Float], to bound: Float) {
     assert(bound > 0)
 
-    var magnitude: Float = .signalingNaN
-    vDSP_maxmgv(values, 1, &magnitude, vDSP_Length(values.count))
-    vDSP_vsmul(values, 1, [bound / magnitude], &values, 1, vDSP_Length(values.count))
+    var max = Float.signalingNaN, min = Float.signalingNaN
+    vDSP_maxv(values, 1, &max, vDSP_Length(values.count))
+    vDSP_minv(values, 1, &min, vDSP_Length(values.count))
+
+    let factor = 2 * bound / (max - min), center = (max + min) / 2
+    vDSP_vsmsa(values, 1, [factor], [-center * factor], &values, 1, vDSP_Length(values.count))
 }

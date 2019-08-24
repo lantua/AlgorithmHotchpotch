@@ -152,11 +152,124 @@ final class AlgorithmTests: XCTestCase {
         XCTAssertTrue(tree.list().isEmpty)
     }
 
+    func testSpectralLayout() {
+        continueAfterFailure = false
+        
+        enum GraphID: Hashable {
+            case a, b, c
+        }
+
+        let nodeCount = 6, dimension = 3
+        let graphWeights = [GraphID.a: 0.5 as Float, .b: 0.7, .c: 1]
+        var edges: [GraphID: Set<Edge>] = [
+            GraphID.a: [.init(0, 2), .init(1, 4), .init(4, 3)],
+            .b: [.init(0, 3), .init(2, 4), .init(2, 1), .init(2, 3)],
+            .c: [.init(5, 0), .init(1, 5), .init(2, 5), .init(5, 3), .init(4, 5)]
+        ]
+
+        var layout = SpectralLayout(graphWeights: graphWeights, dimension: dimension, nodeCount: 2)
+        layout.bounds[0] = 2
+        layout.bounds[1] = 1.4
+        for i in (0..<nodeCount).dropFirst(2) {
+            let node = layout.addNode()
+            XCTAssertEqual(i, node)
+        }
+
+        struct Edge: Hashable {
+            var first: Int, second: Int
+            init(_ first: Int, _ second: Int) {
+                self.first = first
+                self.second = second
+            }
+        }
+        func listEdges() -> [GraphID: Set<Edge>] {
+            return layout.listEdges().mapValues { Set($0.map { Edge($0.0, $0.1) }) }
+        }
+
+        do { // Set up edges
+            for (graph, edges) in edges {
+                for edge in edges {
+                    layout.attach(edge.first, edge.second, graph: graph)
+                }
+            }
+        }
+        XCTAssertEqual(listEdges(), edges)
+        while let id = layout.advance() {
+            let newValue = layout.positions[id]
+            XCTAssertEqual(newValue.max()!, layout.bounds[id], accuracy: 1e-3)
+            XCTAssertEqual(newValue.min()!, -layout.bounds[id], accuracy: 1e-3)
+        }
+
+        do { // Re-attach edges, and detach non-existent edge
+            for (graph, edges) in edges {
+                for edge in edges {
+                    layout.attach(edge.first, edge.second, graph: graph)
+                }
+            }
+            layout.detach(4, 2, graph: .b)
+        }
+        XCTAssertEqual(listEdges(), edges)
+        XCTAssertNil(layout.advance())
+        XCTAssertNil(layout.advance())
+        XCTAssertNil(layout.advance())
+
+        do { // Remove edge
+            edges[.b]!.remove(Edge(2, 3))
+            layout.detach(2, 3, graph: .b)
+        }
+        XCTAssertEqual(listEdges(), edges)
+        while let id = layout.advance() {
+            let newValue = layout.positions[id]
+            XCTAssertEqual(newValue.max()!, layout.bounds[id], accuracy: 1e-3)
+            XCTAssertEqual(newValue.min()!, -layout.bounds[id], accuracy: 1e-3)
+        }
+
+        layout[node: 3] = [0, 1, .nan]
+        do { // Remove node 1, 5 ~> 1
+            layout.attach(1, 2, graph: .a)
+            let oldPosition = layout[node: 5]
+            XCTAssertEqual(layout.removeNode(at: 1), 5)
+            XCTAssertEqual(layout[node: 1], oldPosition)
+
+            edges = edges.mapValues {
+                Set($0.compactMap {
+                    guard $0.first != 1 && $0.second != 1 else {
+                        return nil
+                    }
+                    let newFirst = $0.first == 5 ? 1 : $0.first
+                    let newSecond = $0.second == 5 ? 1 : $0.second
+                    return Edge(newFirst, newSecond)
+                })
+            }
+        }
+        XCTAssertEqual(listEdges(), edges)
+        while let id = layout.advance() {
+            let newValue = layout.positions[id]
+            XCTAssertEqual(newValue.max()!, layout.bounds[id], accuracy: 1e-1)
+            XCTAssertEqual(newValue.min()!, -layout.bounds[id], accuracy: 1e-1)
+        }
+
+        do { // Remove node 4
+            layout.detach(4, 3, graph: .a)
+            XCTAssertNil(layout.removeNode(at: 4))
+            edges = edges.mapValues {
+                Set($0.filter { $0.first != 4 && $0.second != 4 })
+            }
+        }
+        XCTAssertEqual(listEdges(), edges)
+        while let id = layout.advance() {
+            let newValue = layout.positions[id]
+            XCTAssertEqual(newValue.max()!, layout.bounds[id], accuracy: 1e-1)
+            XCTAssertEqual(newValue.min()!, -layout.bounds[id], accuracy: 1e-1)
+        }
+    }
+
     static var allTests = [
         ("testSampler", testSampler),
         ("testHeap", testHeap),
         ("testDeBruijn", testDeBruijn),
         ("testConjugateGradient", testConjugateGradient),
         ("testSplayTree", testSplayTree),
+        ("testSpectralLayout", testSpectralLayout),
     ]
 }
