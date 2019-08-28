@@ -10,7 +10,7 @@ private func exponentialRandom() -> Int {
 public struct SpectralLayout<GraphID: Hashable> {
     private let threshold: Float
     private var graphs: [GraphID: Graph]
-    private var edgeWeights: [[Int: Float]], degrees: [Float], dirtyList: Set<Int> = []
+    private var edgeWeights: [[Int: Float]], degrees: [Float], tmp: [Float], degreeSum: Float, dirtyList: Set<Int> = []
     private var convergedCount = 0, converging = false
 
     /// The position of each node, arrange in positions[dimension][nodeIndex].
@@ -30,13 +30,15 @@ public struct SpectralLayout<GraphID: Hashable> {
         - dimension: Number of dimension to preserve.
         - threshold: Threshold to stop computing the next iteration.
      */
-    public init(graphWeights: [GraphID: Float], dimension: Int, nodeCount: Int = 0, threshold: Float = 1e-9) {
+    public init(graphWeights: [GraphID: Float], dimension: Int, nodeCount: Int = 0, threshold: Float = 1e-5) {
         self.threshold = threshold
 
         graphs = graphWeights.mapValues { Graph(weight: $0, nodeCount: nodeCount) }
 
         edgeWeights = Array(repeating: [:], count: nodeCount)
         degrees = Array(repeating: 0, count: nodeCount)
+        tmp = Array(repeating: .signalingNaN, count: nodeCount)
+        degreeSum = 0
 
         bounds = Array(repeating: 1, count: dimension)
         positions = repeatElement((), count: dimension).map {
@@ -55,21 +57,21 @@ public struct SpectralLayout<GraphID: Hashable> {
         let updating = dimension ?? (convergedCount + exponentialRandom() % (positions.count - convergedCount))
         let old = updating == convergedCount ? positions[updating] : nil
 
-        if updating == convergedCount {
+        center(&positions[updating], degrees: degrees, degreeSum: degreeSum)
+        if converging {
             for other in 0..<convergedCount {
-                orthogonalize(&positions[convergedCount], from: positions[other])
+                orthogonalize(&positions[convergedCount], from: positions[other], degrees: degrees, tmp: &tmp)
             }
         } else if let other = (0..<updating).randomElement() {
-            orthogonalize(&positions[updating], from: positions[other])
+            orthogonalize(&positions[updating], from: positions[other], degrees: degrees, tmp: &tmp)
         }
 
         update(&positions[updating], bound: bounds[updating])
 
         if let old = old {
             let new = positions[updating]
-            let distance = 1 - (dot(old, new) / sqrt(dot(new, new) * dot(old, old)))
 
-            if threshold > distance {
+            if threshold > difference(old, new, degrees: degrees, tmp: &tmp) {
                 if converging {
                     convergedCount += 1
                 }
@@ -117,6 +119,7 @@ public extension SpectralLayout {
         }
         edgeWeights.append([:])
         degrees.append(0)
+        tmp.append(0)
 
         for dimension in positions.indices {
             positions[dimension].append(Float.random(in: -bounds[dimension]...bounds[dimension]))
@@ -140,6 +143,7 @@ public extension SpectralLayout {
 
             edgeWeights.removeLast()
             degrees.removeLast()
+            tmp.removeLast()
             dirtyList.remove(lastID)
         }
 
@@ -215,12 +219,13 @@ private extension SpectralLayout {
         for dirty in dirtyList {
             (edgeWeights[dirty], degrees[dirty]) = computeCache(at: dirty)
         }
+        degreeSum = degrees.reduce(0, +)
 
         dirtyList = []
         convergedCount = 0
     }
 
-    func computeCache(at nodeID: Int) -> (edgeWeight: [Int: Float], degree: Float) {
+    private func computeCache(at nodeID: Int) -> (edgeWeight: [Int: Float], degree: Float) {
         let sum = graphs.values.map { Float($0.outEdges[nodeID].count + $0.inEdges[nodeID].count) * $0.weight }.reduce(0, +)
 
         var weights: [Int: Float] = [:]
@@ -310,28 +315,40 @@ private struct Graph {
     }
 }
 
-private func orthogonalize(_ value: inout [Float], from base: [Float]) {
-    assert(value.count == base.count)
+private func difference(_ lhs: [Float], _ rhs: [Float], degrees: [Float], tmp: inout [Float]) -> Float {
+    assert(lhs.count == rhs.count && lhs.count == degrees.count && lhs.count <= tmp.count)
 
-    let factor = -dot(value, base) / dot(base, base)
+    var mag = Float.signalingNaN
+    vDSP_vsub(lhs, 1, rhs, 1, &tmp, 1, vDSP_Length(lhs.count))
+    vDSP_maxmgv(tmp, 1, &mag, vDSP_Length(lhs.count))
+
+    return mag
+}
+
+private func orthogonalize(_ value: inout [Float], from base: [Float], degrees: [Float], tmp: inout [Float]) {
+    assert(value.count == base.count && value.count == degrees.count && value.count <= tmp.count)
+
+    var numerator = Float.signalingNaN, denominator = Float.signalingNaN
+    vDSP_vmul(base, 1, degrees, 1, &tmp, 1, vDSP_Length(value.count))
+    vDSP_dotpr(value, 1, tmp, 1, &numerator, vDSP_Length(value.count))
+    vDSP_dotpr(base, 1, tmp, 1, &denominator, vDSP_Length(value.count))
+
+    let factor = -numerator / denominator
     vDSP_vsma(base, 1, [factor], value, 1, &value, 1, vDSP_Length(value.count))
 }
 
-private func dot(_ lhs: [Float], _ rhs: [Float]) -> Float {
-    assert(lhs.count == rhs.count)
+private func center(_ values: inout [Float], degrees: [Float], degreeSum: Float) {
+    assert(values.count == degrees.count)
 
-    var output: Float = .signalingNaN
-    vDSP_dotpr(lhs, 1, rhs, 1, &output, vDSP_Length(lhs.count))
-    return output
+    var center = Float.signalingNaN
+    vDSP_dotpr(values, 1, degrees, 1, &center, vDSP_Length(values.count))
+    vDSP_vsadd(values, 1, [-center / degreeSum], &values, 1, vDSP_Length(values.count))
 }
 
-private func rebound(_ values: inout [Float], to bound: Float) {
-    assert(bound > 0)
+private func rebound(_ values: inout [Float], to magnitude: Float.Magnitude) {
+    assert(magnitude > 0)
 
-    var max = Float.signalingNaN, min = Float.signalingNaN
-    vDSP_maxv(values, 1, &max, vDSP_Length(values.count))
-    vDSP_minv(values, 1, &min, vDSP_Length(values.count))
-
-    let factor = 2 * bound / (max - min), center = (max + min) / 2
-    vDSP_vsmsa(values, 1, [factor], [-center * factor], &values, 1, vDSP_Length(values.count))
+    var mag = Float.signalingNaN
+    vDSP_maxmgv(values, 1, &mag, vDSP_Length(values.count))
+    vDSP_vsmul(values, 1, [magnitude / mag], &values, 1, vDSP_Length(values.count))
 }

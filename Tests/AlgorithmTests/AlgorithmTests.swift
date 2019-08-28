@@ -161,8 +161,8 @@ final class AlgorithmTests: XCTestCase {
 
         let nodeCount = 6, dimension = 3
         let graphWeights = [GraphID.a: 0.5 as Float, .b: 0.7, .c: 1]
-        var edges: [GraphID: Set<Edge>] = [
-            GraphID.a: [.init(0, 2), .init(1, 4), .init(4, 3)],
+        var edges = [
+            GraphID.a: [Edge(0, 2), .init(1, 4), .init(4, 3)] as Set,
             .b: [.init(0, 3), .init(2, 4), .init(2, 1), .init(2, 3)],
             .c: [.init(5, 0), .init(1, 5), .init(2, 5), .init(5, 3), .init(4, 5)]
         ]
@@ -196,8 +196,26 @@ final class AlgorithmTests: XCTestCase {
         XCTAssertEqual(listEdges(), edges)
         while let id = layout.advance() {
             let newValue = layout.positions[id]
-            XCTAssertEqual(newValue.max()!, layout.bounds[id], accuracy: 1e-3)
-            XCTAssertEqual(newValue.min()!, -layout.bounds[id], accuracy: 1e-3)
+            XCTAssertEqual(max(-newValue.min()!, newValue.max()!), layout.bounds[id], accuracy: 1e-2)
+        }
+
+        do { // Check against known answer
+            let answer = [
+                [-2.0 as Float, 1.92215795, 0.29370346, -1.30115228, 1.0801786, -0.00584411],
+                [ 0.9338186, 1.11133187, 0.04254553, -0.91637131, -1.4, 0.35699637],
+                [-0.10932717, -0.06994587, 1.0, 0.06691563, -0.34443078, -0.49393831],
+            ]
+
+            for (answer, position) in zip(answer, layout.positions) {
+                let flip = answer.first!.sign != position.first!.sign
+                for (a, p) in zip(answer, position) {
+                    if flip {
+                        XCTAssertEqual(a, -p, accuracy: 1e-4)
+                    } else {
+                        XCTAssertEqual(a, p, accuracy: 1e-4)
+                    }
+                }
+            }
         }
 
         do { // Re-attach edges, and detach non-existent edge
@@ -220,8 +238,7 @@ final class AlgorithmTests: XCTestCase {
         XCTAssertEqual(listEdges(), edges)
         while let id = layout.advance() {
             let newValue = layout.positions[id]
-            XCTAssertEqual(newValue.max()!, layout.bounds[id], accuracy: 1e-3)
-            XCTAssertEqual(newValue.min()!, -layout.bounds[id], accuracy: 1e-3)
+            XCTAssertEqual(max(-newValue.min()!, newValue.max()!), layout.bounds[id], accuracy: 1e-2)
         }
 
         layout[node: 3] = [0, 1, .nan]
@@ -245,8 +262,7 @@ final class AlgorithmTests: XCTestCase {
         XCTAssertEqual(listEdges(), edges)
         while let id = layout.advance() {
             let newValue = layout.positions[id]
-            XCTAssertEqual(newValue.max()!, layout.bounds[id], accuracy: 1e-1)
-            XCTAssertEqual(newValue.min()!, -layout.bounds[id], accuracy: 1e-1)
+            XCTAssertEqual(max(abs(newValue.min()!), abs(newValue.max()!)), layout.bounds[id], accuracy: 1e-2)
         }
 
         do { // Remove node 4
@@ -259,8 +275,7 @@ final class AlgorithmTests: XCTestCase {
         XCTAssertEqual(listEdges(), edges)
         while let id = layout.advance() {
             let newValue = layout.positions[id]
-            XCTAssertEqual(newValue.max()!, layout.bounds[id], accuracy: 1e-1)
-            XCTAssertEqual(newValue.min()!, -layout.bounds[id], accuracy: 1e-1)
+            XCTAssertEqual(max(-newValue.min()!, newValue.max()!), layout.bounds[id], accuracy: 1e-2)
         }
     }
 
