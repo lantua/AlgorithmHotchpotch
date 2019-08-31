@@ -42,15 +42,12 @@ public struct MinHeap<Element> {
         }
         values[0] = element
 
+        let endIndex = values.count / 2
         var current = 0
-        while true {
-            let leftIndex = current * 2 + 1, rightIndex = leftIndex + 1
 
-            guard leftIndex < values.count else {
-                break
-            }
+        while current < endIndex {
+            let leftIndex = current * 2 + 1, rightIndex = leftIndex + 1, child: Int
 
-            let child: Int
             if rightIndex >= values.count || isLessThan(values[leftIndex], values[rightIndex]) {
                 child = leftIndex
             } else {
