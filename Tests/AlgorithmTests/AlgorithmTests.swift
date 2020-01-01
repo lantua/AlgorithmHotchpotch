@@ -152,6 +152,24 @@ final class AlgorithmTests: XCTestCase {
         XCTAssertTrue(tree.list().isEmpty)
     }
 
+    func testMergeCollectionDifference() {
+        do {
+            let v1 = [6, 1, 2, 4, 5]
+            let v2 = [3, 4, 5, 1, 2]
+            let v3 = [1, 2, 3, 4, 7]
+
+            var diff1 = v2.difference(from: v1)
+            diff1 = diff1.inferringMoves()
+            var diff2 = v3.difference(from: v2)
+            diff2 = diff2.inferringMoves()
+
+            let diff = diff1.combining(with: diff2)
+            let result = v1.applying(diff)
+
+            XCTAssertEqual(v3, result)
+        }
+    }
+
     func testSpectralLayout() {
         continueAfterFailure = false
         
